@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  mcp-sharepoint:
+    build: ./services/mcp-sharepoint
+    ports:
+      - "5101:8000"
+    environment:
+      - MCP_NAME=mcp-sharepoint
+    restart: unless-stopped
+
+  mcp-servicenow:
+    build: ./services/mcp-servicenow
+    ports:
+      - "5102:8000"
+    environment:
+      - MCP_NAME=mcp-servicenow
+    restart: unless-stopped
+
+  mcp-policy-kb:
+    build: ./services/mcp-policy-kb
+    ports:
+      - "5103:8000"
+    environment:
+      - MCP_NAME=mcp-policy-kb
+    restart: unless-stopped
+
+  host:
+    build: ./services/host
+    environment:
+      - MCP_SP_URL=http://mcp-sharepoint:8000/sse
+      - MCP_SN_URL=http://mcp-servicenow:8000/sse
+      - MCP_KB_URL=http://mcp-policy-kb:8000/sse
+    depends_on:
+      - mcp-sharepoint
+      - mcp-servicenow
+      - mcp-policy-kb
+    tty: true
+    stdin_open: true
