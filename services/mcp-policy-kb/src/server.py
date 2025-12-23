@@ -3,32 +3,71 @@ from fastmcp import FastMCP
 
 mcp = FastMCP(os.getenv("MCP_NAME", "mcp-policy-kb"))
 
-POLICIES = {
-    "PII Logging": {
-        "id": "policy-001",
+POLICIES = [
+    {
+        "policy_id": "policy-001",
+        "title": "PII Logging Policy",
         "content": (
             "# PII Logging Policy\n"
             "- Never log secrets\n"
             "- Mask emails and identifiers\n"
             "- Hash user identifiers\n"
-        )
-    }
-}
+        ),
+    },
+    {
+        "policy_id": "policy-002",
+        "title": "Data Retention Policy",
+        "content": (
+            "# Data Retention Policy\n"
+            "- Retain logs for 30 days\n"
+            "- Retain audit events for 180 days\n"
+            "- Delete on user request where applicable\n"
+        ),
+    },
+    {
+        "policy_id": "policy-003",
+        "title": "Incident Response Playbook",
+        "content": (
+            "# Incident Response Playbook\n"
+            "- Classify severity (SEV1–SEV3)\n"
+            "- Notify on-call + stakeholders\n"
+            "- Create incident timeline and postmortem\n"
+        ),
+    },
+]
+
+def _snippet(text: str, n: int = 120) -> str:
+    text = text.replace("\n", " ").strip()
+    return text[:n] + ("..." if len(text) > n else "")
 
 @mcp.tool()
-def search_policies(query: str, top_k: int = 5) -> dict:
-    results = [
-        {"policy_id": v["id"], "title": k}
-        for k, v in POLICIES.items()
-        if query.lower() in k.lower()
-    ]
-    return {"query": query, "results": results[:top_k]}
+def search_policy_kb(query: str, top_k: int = 5) -> dict:
+    """
+    Search policy KB for entries relevant to `query` and return top_k results.
+    """
+    q = (query or "").lower().strip()
+    hits = []
+    for p in POLICIES:
+        hay = (p["title"] + "\n" + p["content"]).lower()
+        if q and q in hay:
+            hits.append(
+                {
+                    "policy_id": p["policy_id"],
+                    "title": p["title"],
+                    "snippet": _snippet(p["content"]),
+                }
+            )
+
+    return {"query": query, "results": hits[:top_k]}
 
 @mcp.tool()
-def get_policy(policy_id: str) -> dict:
-    for v in POLICIES.values():
-        if v["id"] == policy_id:
-            return {"policy_id": policy_id, "content": v["content"]}
+def fetch_policy_entry(policy_id: str) -> dict:
+    """
+    Fetch a policy entry by id and return its content.
+    """
+    for p in POLICIES:
+        if p["policy_id"] == policy_id:
+            return {"policy_id": policy_id, "content": p["content"]}
     return {"policy_id": policy_id, "content": "NOT_FOUND"}
 
 if __name__ == "__main__":

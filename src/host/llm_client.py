@@ -1,12 +1,43 @@
 import os
 import json
 import httpx
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
+
+def _is_running_in_container() -> bool:
+    """
+    Best-effort detection:
+    - /.dockerenv exists in Docker
+    - /proc/1/cgroup contains docker/kubepods/containerd in many runtimes
+    """
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", "rt", encoding="utf-8") as f:
+            cgroup = f.read()
+        markers = ("docker", "kubepods", "containerd")
+        return any(m in cgroup for m in markers)
+    except Exception:
+        return False
+
+
+def _default_base_url() -> str:
+    # If user explicitly set it, always honor.
+    env = os.getenv("LLM_BASE_URL")
+    if env:
+        return env.rstrip("/")
+
+    # Otherwise pick a sensible default depending on where we run.
+    if _is_running_in_container():
+        # docker-compose service DNS
+        return "http://llm:8000/v1"
+    # local dev: docker publishes vLLM on localhost:8008
+    return "http://localhost:8008/v1"
 
 
 class LLMClient:
     def __init__(self) -> None:
-        self.base_url = os.getenv("LLM_BASE_URL", "http://llm:8000/v1").rstrip("/")
+        self.base_url = _default_base_url().rstrip("/")
         self.model = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
         self.api_key = os.getenv("LLM_API_KEY")  # optional for local vLLM
 
@@ -23,7 +54,10 @@ class LLMClient:
     ) -> Dict[str, Any]:
         """
         Calls /v1/chat/completions and expects the assistant to output JSON only.
-        We parse and return that JSON object.
+        Returns parsed JSON dict.
+
+        NOTE: We still defensively extract the first {...} block if the model
+        accidentally adds extra text.
         """
         payload = {
             "model": self.model,
@@ -33,27 +67,36 @@ class LLMClient:
         }
 
         url = f"{self.base_url}/chat/completions"
-        with httpx.Client(timeout=timeout_s) as client:
-            try:
+
+        try:
+            with httpx.Client(timeout=timeout_s) as client:
                 r = client.post(url, headers=self._headers, json=payload)
-            except Exception as e:
-                raise RuntimeError(
-                    f"LLMClient failed to reach {url}. "
-                    f"If using docker-compose service DNS like 'llm', run host inside compose; "
-                    f"otherwise use http://localhost:8008/v1. Original: {e}"
-                )
-            r.raise_for_status()
-            data = r.json()
+                r.raise_for_status()
+                data = r.json()
+        except Exception as e:
+            raise RuntimeError(
+                f"LLMClient failed to reach {url}.\n"
+                f"Resolved base_url={self.base_url}, model={self.model}.\n"
+                f"Fixes:\n"
+                f"  - Local dev: export LLM_BASE_URL=http://localhost:8008/v1\n"
+                f"  - Docker-compose: run host inside compose (service DNS 'llm' works)\n"
+                f"Original error: {e}"
+            ) from e
 
         content = data["choices"][0]["message"]["content"].strip()
 
-        # Hard parse: must be JSON. If the model wraps it in text, try extracting JSON object.
+        # Strict parse with fallback extraction
         try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            # fallback: extract first {...} block
+            out = json.loads(content)
+            if not isinstance(out, dict):
+                raise ValueError("Model output JSON must be an object (dict).")
+            return out
+        except Exception:
             start = content.find("{")
             end = content.rfind("}")
             if start != -1 and end != -1 and end > start:
-                return json.loads(content[start : end + 1])
+                out = json.loads(content[start : end + 1])
+                if not isinstance(out, dict):
+                    raise ValueError("Model output JSON must be an object (dict).")
+                return out
             raise

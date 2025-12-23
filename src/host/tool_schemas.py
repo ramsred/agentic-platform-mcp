@@ -17,7 +17,7 @@ TOOL_OUTPUT_MODELS: Dict[ToolKey, Type[BaseModel]] = {
     ("mcp-servicenow", "search_servicenow_tickets"): ServiceNowSearchResult,
     ("mcp-servicenow", "get_ticket"): ServiceNowTicket,
 
-    # If your mcp-policy-kb has these tools; adjust names as needed:
-    ("mcp-policy-kb", "search_policies"): PolicyKBSearchResult,
-    ("mcp-policy-kb", "get_policy"): PolicyDoc,
+    # ✅ match tools/list from mcp-policy-kb
+    ("mcp-policy-kb", "search_policy_kb"): PolicyKBSearchResult,
+    ("mcp-policy-kb", "fetch_policy_entry"): PolicyDoc,
 }

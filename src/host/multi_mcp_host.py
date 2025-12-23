@@ -513,7 +513,7 @@ def main():
     servers = {
         "mcp-sharepoint": os.getenv("MCP_SP_URL", "http://localhost:5101/sse"),
         "mcp-servicenow": os.getenv("MCP_SN_URL", "http://localhost:5102/sse"),
-        "mcp-policy-kb": os.getenv("MCP_KB_URL", "").strip(),
+        "mcp-policy-kb": os.getenv("MCP_KB_URL", "http://localhost:5103/sse"),
     }
     servers = {k: v for k, v in servers.items() if v}  # drop empty
 

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Optional, Literal
+from typing import List
 from pydantic import BaseModel, Field
 
 # ---------- SharePoint ----------
@@ -34,8 +34,7 @@ class ServiceNowTicket(BaseModel):
     content: str
 
 
-# ---------- Policy KB (example) ----------
-# adjust to match your mcp-policy-kb tool outputs
+# ---------- Policy KB ----------
 
 class PolicyKBSearchHit(BaseModel):
     policy_id: str

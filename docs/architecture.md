@@ -1,81 +1,102 @@
 # Architecture
 
+This repo implements a **Multi-MCP Host** that connects to multiple **MCP Servers** over **SSE transport**.
+The Host can list tools and call tools, and includes a guarded single-step “ask” mode.
+
 ## Components
-### 1) Host
-The outer application boundary (CLI/API/UI). Responsibilities:
-- Accept user requests
-- Manage sessions, state, and security controls
-- Provide the LLM with curated context (resources) and tool schemas
-- Mediate approvals (human-in-the-loop) and enforce policies
 
-### 2) Agent Orchestrator
-A **control loop** (LangGraph later) that:
-- Maintains state (messages, tool results, intermediate decisions)
-- Calls the LLM for planning/tool selection
-- Executes tools via MCP clients (with gating)
-- Synthesizes final response
+### MCP Servers (FastMCP + SSE)
+Each server exposes a small tool surface:
+- **mcp-sharepoint**: search/fetch documents
+- **mcp-servicenow**: search/get tickets
+- **mcp-policy-kb**: search/fetch policy entries
 
-**Mental model:**  
-LLM = “reasoning”  
-Agent = “state + loop + enforcement + tool execution”
+All use:
+- `GET /sse` (SSE stream)
+- receive an `endpoint` event with `messages_url`
+- `POST /messages/?session_id=...` for JSON-RPC
 
-### 3) LLM (local)
-Used for:
-- selecting tools + producing arguments
-- synthesizing outputs from tool results/resources
-- optional: routing (later), and summarization
+### Host (MultiMCPHost)
+The host maintains **one MCP client session per server**:
+- Each `MCPSSESession` connects to exactly **one** MCP server
+- `MultiMCPHost` manages multiple sessions and routes calls
 
-Initial plan: local open-source LLM (7B/8B) that supports tool/function calling.
+### LLM (vLLM OpenAI-compatible)
+The host can call an LLM for planning:
+- `POST /v1/chat/completions`
+- model configured with `LLM_MODEL`
 
-### 4) MCP Client(s)
-Protocol handler(s) in the host. 1:1 relationship:
-- One MCP client session per MCP server
-- Handles handshake, capability discovery (tools/resources/prompts), and calls
-
-### 5) MCP Server(s)
-Tool/data providers:
-- Tools: actions (may have side effects)
-- Resources: read-only contextual data
-- Prompts: reusable workflows/templates
-
-Transport: **SSE only** (per current build target), later upgrade to Streamable HTTP.
+The LLM does **not** execute tools directly. It outputs a strict JSON plan, which is validated and gated.
 
 ---
 
-## Request lifecycle (end-to-end)
-1. User sends query to Host (CLI/API).
-2. Host/Agent calls LLM with:
-   - user message
-   - available MCP tool schemas
-   - (optional) selected resources/prompts
-3. LLM returns either:
-   - direct answer, or
-   - tool call(s) with name + arguments
-4. Host enforces policy:
-   - approval gate (human-in-loop)
-   - allow/deny tool calls
-   - roots/scope restrictions (server-side enforcement)
-5. MCP Client sends JSON-RPC request to MCP Server.
-6. MCP Server executes and returns result (and optionally notifications/progress).
-7. Host adds tool results back into message history.
-8. Host calls LLM again for grounded final response.
-9. Host returns final answer to user.
+## Data Flow: Connection + Initialization (per server)
+
+1. Host opens SSE stream:
+   - `GET /sse`
+2. Server emits:
+   - `event: endpoint`
+   - `data: /messages/?session_id=...`
+3. Host POSTs MCP handshake:
+   - `initialize` (JSON-RPC request)
+   - `notifications/initialized` (JSON-RPC notification)
+4. Host can now call:
+   - `tools/list`
+   - `tools/call`
 
 ---
 
-## Security & Controls (baseline)
-- Tool approval prompts (human in loop)
-- PII logging policy checks before tool execution
-- Roots-like scope enforcement for filesystem/document access
-- Strict tool schema validation
-- Container sandboxing for servers (Docker → K3s)
+## Ask Flow (Single Step)
+
+User:
+- `ask "<natural language>"`
+
+Host:
+1. Input policy gate (block unsafe requests early)
+2. Tools ground truth:
+   - `tools/list` per server (build allowlist)
+3. Planner:
+   - send system+tools to LLM
+   - LLM returns strict JSON plan: `{type:"call_tool", server, tool, args}`
+4. Validation gates:
+   - JSON strict parsing
+   - schema validation vs live tool catalog
+   - allowlist enforcement (only tools that exist)
+5. Execute exactly one tool:
+   - `tools/call`
+6. Typed parsing:
+   - parse `structuredContent` into Pydantic models
+7. Optional grounded summary:
+   - only from tool output text
+   - each claim must include evidence snippet
 
 ---
 
-## Observability (baseline)
-- OpenTelemetry tracing across:
-  - host request
-  - LLM calls
-  - tool calls per server
-- Metrics: latency, tool usage rate, errors, token usage
-- Logs: structured JSON logs with correlation IDs
+## Mermaid Diagram
+
+```mermaid
+flowchart LR
+  U[User CLI] --> H[MultiMCPHost]
+
+  subgraph MCP Servers
+    SP[mcp-sharepoint]
+    SN[mcp-servicenow]
+    KB[mcp-policy-kb]
+  end
+
+  subgraph LLM
+    V[vLLM OpenAI API]
+  end
+
+  H <-- SSE + JSON-RPC --> SP
+  H <-- SSE + JSON-RPC --> SN
+  H <-- SSE + JSON-RPC --> KB
+
+  H -->|plan request| V
+  V -->|strict JSON plan| H
+
+  H -->|tools/call| SP
+  H -->|tools/call| SN
+  H -->|tools/call| KB
+
+  H -->|typed parse + optional grounded summary| U
