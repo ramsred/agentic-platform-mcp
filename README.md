@@ -1,3 +1,6 @@
+
+![CI](https://github.com/ramsred/agentic-platform-mcp/actions/workflows/ci.yml/badge.svg)
+
 # agentic-platform-mcp
 
 A production-grade **agentic AI platform** built on the **Model Context Protocol (MCP)**:
