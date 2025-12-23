@@ -46,10 +46,6 @@ from .summarizer import (
     validate_grounded_summary,
     GroundingError,
 )
-
-from .typed_parser import parse_typed_tool_output, ToolOutputParseError
-
-
 # -----------------------------
 # Utilities
 # -----------------------------
@@ -368,49 +364,38 @@ class MultiMCPHost:
         if server not in self.sessions:
             raise KeyError(f"Unknown server '{server}'. Available: {list(self.sessions.keys())}")
         return self.sessions[server].call_tool(tool, args)
-
-    def call_typed(self, server: str, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        raw = self.call(server, tool, args)
-        try:
-            typed = parse_typed_tool_output(server, tool, raw)
-            return {"raw": raw, "typed": typed.model_dump()}
-        except ToolOutputParseError as e:
-            return {"raw": raw, "typed_error": str(e)}
-
-    def build_allowlist_from_tools_payload(self, servers_to_tools: dict) -> dict[str, set[str]]:
+    
+    def build_allowlist_from_live_tools(self) -> dict[str, set[str]]:
         """
-        Build allowlist from tools/list results, but only from servers
-        that successfully returned a tools list.
+        Build allowlist from tools/list results so we ONLY ever call
+        tools that actually exist on each server.
         """
+        servers_to_tools = self.tools_all()
         allow: dict[str, set[str]] = {}
         for srv, resp in servers_to_tools.items():
             tools = []
-            if isinstance(resp, dict) and "result" in resp and isinstance(resp["result"], dict):
+            if isinstance(resp, dict) and "result" in resp:
                 tools = resp["result"].get("tools", [])
             allow[srv] = {t["name"] for t in tools if isinstance(t, dict) and "name" in t}
         return allow
-
-    def summarize_tool_result(self, tool_result_obj: dict) -> dict:
+    
+    def summarize_tool_result(self, tool_result: dict) -> dict:
         """
         Produce grounded summary with evidence quotes.
-        Input MUST already be schema-validated (typed output preferred).
-        Raises GroundingError if claims are not supported by evidence.
+        If grounding fails, raise GroundingError.
         """
         llm = LLMClient()
-
-        source_text = _to_source_text(tool_result_obj)
+        source_text = _to_source_text(tool_result)
 
         msgs = build_summarizer_messages(source_text)
         raw = llm.chat_json(messages=msgs, max_tokens=512, temperature=0.0)
 
-        # Strict JSON gate
+        # Your existing strict JSON gate:
+        from .safety import parse_strict_json_plan  # reuse strict JSON parsing
+
         summary = parse_strict_json_plan(raw)
-
-        # Grounding gate (claims must quote source_text)
         validate_grounded_summary(summary, source_text)
-
         return summary
-
     def ask_once(self, user_query: str) -> dict:
         # Gate 0: input policy
         ok, reason = policy_check_user_query(user_query)
@@ -419,86 +404,63 @@ class MultiMCPHost:
 
         llm = LLMClient()
 
-        # Live ground truth tools
+        # Live ground truth
         servers_to_tools = self.tools_all()
-        ok_tools = {srv: resp for srv, resp in servers_to_tools.items()
-                    if isinstance(resp, dict) and "result" in resp}
+        ok_tools = {srv: resp for srv, resp in servers_to_tools.items() if isinstance(resp, dict) and "result" in resp}
 
-        # Gate 1/2: allowlist from live tools
-        allowlist = self.build_allowlist_from_tools_payload(ok_tools)
+        # Gate 2: allowlist from live tools
+        allowlist = self.build_allowlist_from_live_tools()
 
-        # Planner messages
         messages = build_planner_messages(user_query, ok_tools)
 
-        # Planner must return strict JSON
+        # Force strict JSON
         raw_plan = llm.chat_json(messages=messages, max_tokens=256, temperature=0.0)
         try:
             plan = parse_strict_json_plan(raw_plan)
         except PlanParseError as e:
-            return {
-                "type": "blocked",
-                "reason": f"Planner output rejected: {str(e)}",
-                "raw": str(raw_plan)[:400],
-            }
+            return {"type": "blocked", "reason": f"Planner output rejected: {str(e)}", "raw": str(raw_plan)[:400]}
 
-        # Validate plan against live catalog
+        # Validate against catalog schema you already built (Gate 1 + correctness)
         catalog_dict = json.loads(build_tool_catalog(ok_tools))
         try:
             server, tool, args = validate_plan(plan, catalog_dict)
         except ValidationError as e:
             return {"type": "blocked", "reason": f"Plan validation failed: {str(e)}", "plan": plan}
 
-        # Enforce allowlist (only tools that exist on that server)
+        # Gate 2: enforce allowlist
         try:
             enforce_tool_allowlist(server, tool, allowlist)
         except ToolNotAllowed as e:
             return {"type": "blocked", "reason": str(e), "plan": plan}
 
         # Gate 3: execute at most one tool
+        # (validate_plan already forces one tool_call; this is the execution step)
         tool_result = self.call(server, tool, args)
 
-        # Typed parsing (output schema gate)
-        typed_payload = None
-        try:
-            typed = parse_typed_tool_output(server, tool, tool_result)
-            typed_payload = typed.model_dump()
-        except ToolOutputParseError as e:
-            return {
-                "type": "tool_result",
-                "plan": plan,
-                "note": f"Typed parsing blocked: {str(e)}",
-                "raw": tool_result,
-            }
-
-        # Decide whether to summarize (query intent OR env flag)
-        wants_summary = "summarize" in user_query.lower()
-        summarize_enabled = os.getenv("SAFE_SUMMARIZE", "0").strip() == "1"
-
-        if wants_summary or summarize_enabled:
+        # Optional summarizer gate: ON only if explicitly enabled
+        summarize = os.getenv("SAFE_SUMMARIZE", "0").strip() == "1"
+        if summarize:
             try:
-                summary = self.summarize_tool_result(typed_payload)
+                summary = self.summarize_tool_result(tool_result)
                 return {
                     "type": "tool_result_with_summary",
-                    "plan": plan,
-                    "typed": typed_payload,
+                    "plan": {"server": server, "tool": tool, "args": args},
                     "summary": summary,
-                    "raw": tool_result,
+                    "result": tool_result,
                 }
             except GroundingError as e:
+                # Fall back to raw tool output (still safe)
                 return {
                     "type": "tool_result",
-                    "plan": plan,
-                    "typed": typed_payload,
                     "note": f"Summary blocked (grounding failed): {str(e)}",
-                    "raw": tool_result,
+                    "plan": {"server": server, "tool": tool, "args": args},
+                    "result": tool_result,
                 }
 
-        # Default: return tool result only
         return {
             "type": "tool_result",
-            "plan": plan,
-            "typed": typed_payload,
-            "raw": tool_result,
+            "plan": {"server": server, "tool": tool, "args": args},
+            "result": tool_result,
         }
 
 
@@ -515,7 +477,8 @@ def main():
         "mcp-servicenow": os.getenv("MCP_SN_URL", "http://localhost:5102/sse"),
         "mcp-policy-kb": os.getenv("MCP_KB_URL", "").strip(),
     }
-    servers = {k: v for k, v in servers.items() if v}  # drop empty
+    # Drop empty entries
+    servers = {k: v for k, v in servers.items() if v}
 
     host = MultiMCPHost(servers)
     try:
@@ -562,7 +525,9 @@ def main():
                 continue
 
             if line.startswith("ask "):
-                q = line[len("ask "):].strip().strip('"').strip("'")
+                # accept ask "...", ask '...', or ask raw text
+                q = line[len("ask "):].strip()
+                q = q.strip('"').strip("'")
                 out = host.ask_once(q)
                 print(json.dumps(out, indent=2))
                 continue
