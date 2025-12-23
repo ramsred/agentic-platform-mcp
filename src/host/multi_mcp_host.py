@@ -46,9 +46,13 @@ from .summarizer import (
     validate_grounded_summary,
     GroundingError,
 )
-
+# LangGraph runner (Option A)
+try:
+    from src.graph.langgraph_agent import run_once as run_langgraph_once
+except Exception:
+    run_langgraph_once = None
+    
 from .typed_parser import parse_typed_tool_output, ToolOutputParseError
-
 
 # -----------------------------
 # Utilities
@@ -563,7 +567,14 @@ def main():
 
             if line.startswith("ask "):
                 q = line[len("ask "):].strip().strip('"').strip("'")
-                out = host.ask_once(q)
+
+                # Prefer LangGraph path (single source of truth)
+                if run_langgraph_once is not None:
+                    out = run_langgraph_once(host, q)
+                else:
+                    # Fallback to legacy planner path if graph module not available
+                    out = host.ask_once(q)
+
                 print(json.dumps(out, indent=2))
                 continue
 
